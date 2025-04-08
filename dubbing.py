@@ -3,12 +3,13 @@ import pandas as pd
 import requests
 import json
 import time
-import os # 用于构建输出文件路径
-from rating_script import rate_translation, RATING_PROMPT_TEMPLATE # 导入评分函数和模板
+import os
+from rating_script import rate_translation, RATING_PROMPT_TEMPLATE
+from constant import *
 
 # --- 配置部分 ---
-# CSV文件路径 CSV_FILE_PATH = r"C:\Users\User\Downloads\AI配音中翻英台本 0320\AI配音中翻英台本\电视剧\好事成双\14-01_TJ.csv"
-CSV_FILE_PATH = r"C:\Users\User\Downloads\AI配音中翻英台本 0320\AI配音中翻英台本\电视剧\好事成双\14-01_TJ.csv"
+# 基础目录路径
+BASE_DIR = r"C:\Users\User\Downloads\AI配音中翻英台本 0320\AI配音中翻英台本\电视剧"
 # API接口地址
 API_URL = "https://cloud.infini-ai.com/maas/v1/chat/completions"
 # API密钥（Bearer Token格式）
@@ -19,7 +20,7 @@ MODEL_NAME = "deepseek-v3"
 # --- 翻译提示词模板 ---
 PROMPT_TEMPLATE = """
 翻译要求：将电视剧《好事成双》中文剧本译为美式英语配音稿。需确保：
-1）角色身份准确，与第10项的任务身份一致（林双-前顶尖高材生/全职主妇，顾许-海归精英/林双同学，江喜-职场女性/林双闺蜜）,中文中涉及特殊术语的请参考第11项的翻译术语字典表，例如： 中文 “公子”	 你直接使用术语对照表的结果就行：Young Master，“姑奶奶” 直接使用 Granny。
+1）角色身份准确，与第10项的任务身份一致（林双-前顶尖高材生/全职主妇，顾许-海归精英/林双同学，江喜-职场女性/林双闺蜜）,中文中涉及特殊术语的请参考第11项的翻译术语字典表，例如： 中文 "公子"	 你直接使用术语对照表的结果就行：Young Master，"姑奶奶" 直接使用 Granny。
 2）译文行数与原文逐行对应 
 3）口语化表达符合角色身份 
 4）专业术语保持语境一致 
@@ -138,28 +139,29 @@ def translate_text(text, model_name, api_key, api_url, prompt_template):
         print(f"翻译过程中发生意外错误: {e}")
         return f"ERROR: 意外错误 ({e})"
 
-if __name__ == "__main__":
-    print(f"开始处理文件: {CSV_FILE_PATH}")
+def process_csv_file(csv_path):
+    """
+    处理单个CSV文件
+    
+    参数:
+        csv_path: CSV文件的完整路径
+    """
+    print(f"\n开始处理文件: {csv_path}")
     print(f"使用模型: {MODEL_NAME}")
-
-    # 检查文件是否存在
-    if not os.path.exists(CSV_FILE_PATH):
-        print(f"错误: 找不到文件 {CSV_FILE_PATH}")
-        exit()
 
     try:
         # 尝试使用UTF-8编码读取CSV文件
         try:
-            df = pd.read_csv(CSV_FILE_PATH, encoding='utf-8')
+            df = pd.read_csv(csv_path, encoding='utf-8')
         except UnicodeDecodeError:
             print("UTF-8解码失败，尝试使用GBK编码...")
-            df = pd.read_csv(CSV_FILE_PATH, encoding='gbk')
+            df = pd.read_csv(csv_path, encoding='gbk')
 
         # 检查必要的列是否存在
-        required_cols = ['speaker', 'start_time', 'end_time', 'transcription', 'translation']
-        if not all(col in df.columns for col in required_cols[:-1]):  # 不检查translation列，因为这是我们要添加的
-            print(f"错误: CSV文件必须包含以下列: {required_cols[:-1]}")
-            exit()
+        required_cols = ['speaker', 'start_time', 'end_time', 'transcription']
+        if not all(col in df.columns for col in required_cols):
+            print(f"错误: CSV文件必须包含以下列: {required_cols}")
+            return
 
         # 初始化翻译结果列表和评分结果列表
         translations = []
@@ -184,6 +186,8 @@ if __name__ == "__main__":
                 localization_scores.append(0)
                 continue
             print(f"正在处理第 {index + 1}/{total_rows} 行: '{str(chinese_text)}'")
+
+            print(f'使用的提示词模版是：{PROMPT_TEMPLATE}')
             # 调用翻译函数
             english_translation = translate_text(
                 chinese_text,
@@ -226,7 +230,7 @@ if __name__ == "__main__":
         # 确保列表长度与数据框行数匹配
         if len(translations) != len(df) or len(accuracy_scores) != len(df):
             print(f"错误: 结果数量与数据框行数不匹配")
-            exit()
+            return
 
         # 添加翻译结果列和评分结果列
         df['target-translation'] = translations
@@ -246,8 +250,15 @@ if __name__ == "__main__":
         df = df[final_columns]
 
         # 构建输出文件路径
-        base, ext = os.path.splitext(CSV_FILE_PATH)
-        output_file_path = f"{base}_translated_rated{ext}"
+        base, ext = os.path.splitext(csv_path)
+        # 获取相对于BASE_DIR的路径
+        rel_path = os.path.relpath(base, BASE_DIR)
+        # 创建新的输出目录路径
+        output_dir = os.path.join(BASE_DIR, 'translated_rated', os.path.dirname(rel_path))
+        # 确保输出目录存在
+        os.makedirs(output_dir, exist_ok=True)
+        # 构建完整的输出文件路径
+        output_file_path = os.path.join(output_dir, f"{os.path.basename(base)}_translated_rated{ext}")
         
         # 保存结果到新文件（使用utf-8-sig编码以确保Excel能正确显示中文）
         df.to_csv(output_file_path, index=False, encoding='utf-8-sig')
@@ -256,8 +267,35 @@ if __name__ == "__main__":
         print(f"结果已保存至: {output_file_path}")
 
     except FileNotFoundError:
-        print(f"错误: 找不到文件 {CSV_FILE_PATH}")
+        print(f"错误: 找不到文件 {csv_path}")
     except pd.errors.EmptyDataError:
-        print(f"错误: CSV文件为空 {CSV_FILE_PATH}")
+        print(f"错误: CSV文件为空 {csv_path}")
     except Exception as e:
         print(f"处理过程中发生错误: {e}")
+
+def find_and_process_csv_files(base_dir):
+    """
+    递归查找并处理所有CSV文件
+    
+    参数:
+        base_dir: 基础目录路径
+    """
+    # 遍历基础目录下的所有文件和子目录
+    for root, dirs, files in os.walk(base_dir):
+        for file in files:
+            if file.endswith('.csv'):
+                csv_path = os.path.join(root, file)
+                process_csv_file(csv_path)
+
+if __name__ == "__main__":
+
+    
+    # 检查基础目录是否存在
+    if not os.path.exists(BASE_DIR):
+        print(f"错误: 找不到目录 {BASE_DIR}")
+        exit()
+
+    # 开始处理所有CSV文件
+    print(f"开始处理目录: {BASE_DIR}")
+    find_and_process_csv_files(BASE_DIR)
+    print("\n所有文件处理完成！")
