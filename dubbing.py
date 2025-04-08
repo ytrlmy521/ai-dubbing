@@ -119,9 +119,9 @@ if __name__ == "__main__":
             df = pd.read_csv(CSV_FILE_PATH, encoding='gbk')
 
         # 检查必要的列是否存在
-        required_cols = ['speaker', 'start_time', 'end_time', 'transcription']
-        if not all(col in df.columns for col in required_cols):
-            print(f"错误: CSV文件必须包含以下列: {required_cols}")
+        required_cols = ['speaker', 'start_time', 'end_time', 'transcription', 'translation']
+        if not all(col in df.columns for col in required_cols[:-1]):  # 不检查translation列，因为这是我们要添加的
+            print(f"错误: CSV文件必须包含以下列: {required_cols[:-1]}")
             exit()
 
         # 初始化翻译结果列表和评分结果列表
@@ -133,8 +133,12 @@ if __name__ == "__main__":
         # 逐行处理翻译和评分
         for index, row in df.iterrows():
             chinese_text = row['transcription'].rstrip(',')
-            print(f"正在处理第 {index + 1}/{total_rows} 行: '{str(chinese_text)[:100]}...'")
-
+            print(chinese_text)
+            if str(chinese_text).strip() == '1':
+                translations.append("")  # 添加空字符串作为翻译
+                ratings.append("")      # 添加空字符串作为评分
+                continue
+            print(f"正在处理第 {index + 1}/{total_rows} 行: '{str(chinese_text)}'")
             # 调用翻译函数
             english_translation = translate_text(
                 chinese_text,
@@ -145,7 +149,7 @@ if __name__ == "__main__":
             )
             translations.append(english_translation)
 
-              # 添加延时以避免API限制
+            # 添加延时以避免API限制
             time.sleep(5)
 
             # 对翻译结果进行评分
@@ -164,11 +168,20 @@ if __name__ == "__main__":
                 ratings.append("评分失败")  # 如果翻译失败，评分也标记为失败
             
             time.sleep(5)
-          
+
+        # 确保列表长度与数据框行数匹配
+        if len(translations) != len(df) or len(ratings) != len(df):
+            print(f"错误: 翻译结果数量({len(translations)})或评分结果数量({len(ratings)})与数据框行数({len(df)})不匹配")
+            exit()
 
         # 添加翻译结果列和评分结果列
-        df['translation'] = translations
+        df['target-translation'] = translations
         df['rating'] = ratings
+        # df['transcription']= chinese_text
+
+        # 只选择需要的列
+        final_columns = ['speaker', 'start_time', 'end_time', 'transcription', 'translation', 'target-translation','rating']
+        df = df[final_columns]
 
         # 构建输出文件路径
         base, ext = os.path.splitext(CSV_FILE_PATH)
