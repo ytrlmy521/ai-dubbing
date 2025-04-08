@@ -126,7 +126,11 @@ if __name__ == "__main__":
 
         # 初始化翻译结果列表和评分结果列表
         translations = []
-        ratings = []
+        accuracy_scores = []
+        fluency_scores = []
+        contextual_scores = []
+        lip_sync_scores = []
+        localization_scores = []
         total_rows = len(df)
         print(f"共发现 {total_rows} 行需要处理")
 
@@ -136,7 +140,11 @@ if __name__ == "__main__":
             print(chinese_text)
             if str(chinese_text).strip() == '1':
                 translations.append("")  # 添加空字符串作为翻译
-                ratings.append("")      # 添加空字符串作为评分
+                accuracy_scores.append(0)
+                fluency_scores.append(0)
+                contextual_scores.append(0)
+                lip_sync_scores.append(0)
+                localization_scores.append(0)
                 continue
             print(f"正在处理第 {index + 1}/{total_rows} 行: '{str(chinese_text)}'")
             # 调用翻译函数
@@ -155,7 +163,7 @@ if __name__ == "__main__":
             # 对翻译结果进行评分
             if english_translation and not english_translation.startswith("ERROR"):
                 print(f"正在对翻译结果进行评分...")
-                rating = rate_translation(
+                scores = rate_translation(
                     chinese_text,
                     english_translation,
                     MODEL_NAME,
@@ -163,24 +171,41 @@ if __name__ == "__main__":
                     API_URL,
                     RATING_PROMPT_TEMPLATE
                 )
-                ratings.append(rating)
+                accuracy_scores.append(scores.get('accuracy', 0))
+                fluency_scores.append(scores.get('fluency', 0))
+                contextual_scores.append(scores.get('contextual', 0))
+                lip_sync_scores.append(scores.get('lipsync', 0))
+                localization_scores.append(scores.get('localization', 0))
             else:
-                ratings.append("评分失败")  # 如果翻译失败，评分也标记为失败
+                # 如果翻译失败，所有评分都设为0
+                accuracy_scores.append(0)
+                fluency_scores.append(0)
+                contextual_scores.append(0)
+                lip_sync_scores.append(0)
+                localization_scores.append(0)
             
             time.sleep(5)
 
         # 确保列表长度与数据框行数匹配
-        if len(translations) != len(df) or len(ratings) != len(df):
-            print(f"错误: 翻译结果数量({len(translations)})或评分结果数量({len(ratings)})与数据框行数({len(df)})不匹配")
+        if len(translations) != len(df) or len(accuracy_scores) != len(df):
+            print(f"错误: 结果数量与数据框行数不匹配")
             exit()
 
         # 添加翻译结果列和评分结果列
         df['target-translation'] = translations
-        df['rating'] = ratings
-        # df['transcription']= chinese_text
+        df['accuracy_score'] = accuracy_scores
+        df['fluency_score'] = fluency_scores
+        df['contextual_score'] = contextual_scores
+        df['lip_sync_score'] = lip_sync_scores
+        df['localization_score'] = localization_scores
 
         # 只选择需要的列
-        final_columns = ['speaker', 'start_time', 'end_time', 'transcription', 'translation', 'target-translation','rating']
+        final_columns = [
+            'speaker', 'start_time', 'end_time', 'transcription', 
+            'translation', 'target-translation', 'accuracy_score', 
+            'fluency_score', 'contextual_score', 'lip_sync_score', 
+            'localization_score'
+        ]
         df = df[final_columns]
 
         # 构建输出文件路径

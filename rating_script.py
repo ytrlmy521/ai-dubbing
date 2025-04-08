@@ -14,38 +14,46 @@ MODEL_NAME = "deepseek-v3" # 或者其他适合评分任务的模型
 RATING_PROMPT_TEMPLATE = """
 你是一个专业的影视剧译制翻译质量评估员。请根据以下评分标准，对提供的中文原文和英文译文进行评估。
 
-评分标准（总分100分）:
-1.  准确性 (Accuracy) - 30 分: 是否准确传达原文含义，无遗漏或曲解。
-    - 27-30: 完全准确
-    - 20-26: 基本准确，轻微偏差
-    - 10-19: 明显错误，核心意思尚存
-    - 0-9: 严重失真
-2.  流畅度 (Fluency) - 25 分: 是否符合英语母语者表达习惯，语法正确流畅。
-    - 22-25: 自然流畅
-    - 15-21: 较自然，轻微不地道
-    - 8-14: 可理解，非母语风格
-    - 0-7: 生硬，语法/表达严重不当
-3.  语境适应性 (Contextual Appropriateness) - 20 分: 是否符合影视剧场景、角色语气、情绪、性格和剧情。
-    - 18-20: 完美契合语境
-    - 12-17: 基本符合，语气稍有偏差
-    - 6-11: 与语境脱节，角色体现不足
-    - 0-5: 完全无视语境
-4.  对口型匹配度 (Lip-Sync Compatibility) - 15 分: 英文单词数、音节数和节奏是否与中文口型接近（考虑语流节奏）。
-    - 13-15: 高度匹配
-    - 9-12: 基本匹配，需轻微调整
-    - 5-8: 勉强可用，明显不符
-    - 0-4: 完全无法对口型
-5.  文化适用性 (Localization) - 10 分: 是否适应目标语英语观众文化背景，避免直译障碍。
-    - 9-10: 充分本地化
-    - 6-8: 基本适配，细节未优化
-    - 3-5: 未完全本地化，可能误解
-    - 0-2: 忽视文化差异
+评分标准（每个维度满分100分）:
+1.  准确性 (Accuracy) - 100分: 是否准确传达原文含义，无遗漏或曲解。
+    - 90-100: 完全准确
+    - 70-89: 基本准确，轻微偏差
+    - 40-69: 明显错误，核心意思尚存
+    - 0-39: 严重失真
+2.  流畅度 (Fluency) - 100分: 是否符合英语母语者表达习惯，语法正确流畅。
+    - 90-100: 自然流畅
+    - 70-89: 较自然，轻微不地道
+    - 40-69: 可理解，非母语风格
+    - 0-39: 生硬，语法/表达严重不当
+3.  语境适应性 (Contextual Appropriateness) - 100分: 是否符合影视剧场景、角色语气、情绪、性格和剧情。
+    - 90-100: 完美契合语境
+    - 70-89: 基本符合，语气稍有偏差
+    - 40-69: 与语境脱节，角色体现不足
+    - 0-39: 完全无视语境
+4.  对口型匹配度 (Lip-Sync Compatibility) - 100分: 英文单词数、音节数和节奏是否与中文口型接近（考虑语流节奏）。
+    - 90-100: 高度匹配
+    - 70-89: 基本匹配，需轻微调整
+    - 40-69: 勉强可用，明显不符
+    - 0-39: 完全无法对口型
+5.  文化适用性 (Localization) - 100分: 是否适应目标语英语观众文化背景，避免直译障碍。
+    - 90-100: 充分本地化
+    - 70-89: 基本适配，细节未优化
+    - 40-69: 未完全本地化，可能误解
+    - 0-39: 忽视文化差异
 
 评估以下内容：
 中文原文: "{source_text}"
 英文译文: "{translation_text}"
 
-请根据上述标准进行综合评分，并**直接返回最终的总分数值，格式为 'XX分'**，不要包含任何评分细则、解释或其他文字。例如，如果评分是90分，就只返回 "90分"。
+请根据上述标准进行评分，并按照以下格式返回评分结果：
+accuracy:XX,fluency:XX,contextual:XX,lipsync:XX,localization:XX
+
+例如：accuracy:85,fluency:90,contextual:88,lipsync:75,localization:82
+
+注意：
+1. 所有分值必须是0-100之间的整数
+2. 严格按照上述格式返回，不要包含任何其他文字
+3. 使用英文逗号分隔各个评分
 """
 
 # --- 从笔记中复制的 translate_text 函数 ---
@@ -61,7 +69,7 @@ def translate_text(prompt_content, model_name, api_key, api_url):
         api_url: API接口地址。
 
     返回:
-        大模型的响应内容（预期是翻译结果或评分分数）。
+        大模型的响应内容。
     """
     if not prompt_content: # 检查输入prompt是否为空
         return "ERROR: Prompt content is empty"
@@ -77,7 +85,7 @@ def translate_text(prompt_content, model_name, api_key, api_url):
       "messages": [
         {
           "role": "user",
-          "content": prompt_content # 这里是完整的评分prompt
+          "content": prompt_content
         }
       ],
       "stream": False,
@@ -85,19 +93,28 @@ def translate_text(prompt_content, model_name, api_key, api_url):
     })
 
     try:
-        response = requests.post(api_url, headers=headers, data=payload, timeout=90) # 增加超时时间
+        response = requests.post(api_url, headers=headers, data=payload, timeout=90)
         response.raise_for_status()
 
         data = response.json()
         # 提取模型返回的内容
         result = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+        
+        # 清理响应内容
         result = result.strip()
-
-        # 简单验证是否符合 "XX分" 格式 (可选，但有助于调试)
-        # import re
-        # if not re.match(r"^\d+分$", result):
-        #    print(f"Warning: LLM response format might be incorrect: {result}")
-        print(f"评分结果: {result}")
+        
+        # 如果响应不是有效的JSON，尝试修复
+        if not result.startswith('{'):
+            # 尝试找到第一个 { 和最后一个 }
+            start = result.find('{')
+            end = result.rfind('}')
+            if start != -1 and end != -1:
+                result = result[start:end+1]
+        
+        # 再次清理
+        result = result.strip()
+        
+        print(f"原始响应: {result}")
         return result
 
     except requests.exceptions.RequestException as e:
@@ -127,7 +144,7 @@ def rate_translation(source_text, translation_text, model_name, api_key, api_url
         rating_prompt_template: 包含评分标准的提示词模板。
 
     返回:
-        LLM返回的评分结果 (预期格式: "XX分")。
+        包含五个维度评分的字典。
     """
     # 构建完整的评分prompt
     rating_prompt = rating_prompt_template.format(
@@ -135,10 +152,63 @@ def rate_translation(source_text, translation_text, model_name, api_key, api_url
         translation_text=translation_text
     )
 
-    # 调用 translate_text 函数（实际执行的是评分任务）
-    score = translate_text(rating_prompt, model_name, api_key, api_url)
+    # 调用 translate_text 函数获取评分结果
+    score_text = translate_text(rating_prompt, model_name, api_key, api_url)
+    
+    # 如果返回错误，直接返回默认值
+    if score_text.startswith("ERROR"):
+        print(f"API返回错误: {score_text}")
+        return get_default_scores()
+    
+    try:
+        # 清理响应文本
+        score_text = score_text.strip()
+        
+        # 解析评分结果
+        scores = {}
+        for item in score_text.split(','):
+            if ':' in item:
+                key, value = item.split(':')
+                try:
+                    value = int(value.strip())
+                    if 0 <= value <= 100:
+                        scores[key.strip()] = value
+                    else:
+                        print(f"分值超出范围: {key}={value}")
+                        scores[key.strip()] = 0
+                except ValueError:
+                    print(f"无效的分值: {key}={value}")
+                    scores[key.strip()] = 0
+        
+        # 确保所有必需的评分都存在
+        required_scores = {
+            'accuracy': 0,
+            'fluency': 0,
+            'contextual': 0,
+            'lipsync': 0,
+            'localization': 0
+        }
+        
+        # 更新默认值
+        for key in required_scores:
+            if key in scores:
+                required_scores[key] = scores[key]
+        
+        return required_scores
+        
+    except Exception as e:
+        print(f"解析评分结果时发生错误: {e}")
+        return get_default_scores()
 
-    return score
+def get_default_scores():
+    """返回默认的评分字典"""
+    return {
+        'accuracy': 0,
+        'fluency': 0,
+        'contextual': 0,
+        'lipsync': 0,
+        'localization': 0
+    }
 
 # --- 主执行部分 ---
 if __name__ == "__main__":
