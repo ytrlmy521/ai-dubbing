@@ -88,7 +88,7 @@ def main():
                     writer.writerow(row)
                     
                     # 添加延时以避免API限制
-                    time.sleep(10)
+                    time.sleep(1)
         
         print(f"Translation completed. Results saved to: {output_file}")
         

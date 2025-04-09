@@ -10,6 +10,12 @@ from constant import *
 # --- 配置部分 ---
 # 基础目录路径
 BASE_DIR = r"C:\Users\User\Downloads\AI配音中翻英台本 0320\AI配音中翻英台本\电视剧"
+out_put_BASE_DIR = r"C:\Users\User\Downloads\AI配音中翻英台本 0320\AI配音中翻英台本"
+
+# BASE_DIR = r"E:\Apple\电视剧"
+# out_put_BASE_DIR = r"E:\Apple"
+
+
 # API接口地址
 API_URL = "https://api.deepseek.com/v1/chat/completions"
 # API密钥（Bearer Token格式）
@@ -200,9 +206,12 @@ def process_csv_file(csv_path):
 
         # 逐行处理翻译和评分
         for index, row in df.iterrows():
-            chinese_text = row['transcription'].rstrip(',')
+            # 确保chinese_text是字符串类型，然后再调用rstrip方法
+            chinese_text = str(row['transcription']).rstrip(',')
             print(chinese_text)
-            if str(chinese_text).strip() == '1':
+            # 检查transcription是否为空或等于'1'，如果是则跳过翻译
+            if pd.isna(row['transcription']) or str(chinese_text).strip() == '' or str(chinese_text).strip() == '1':
+                print(f"跳过第 {index + 1} 行: 文本为空")
                 translations.append("")  # 添加空字符串作为翻译
                 accuracy_scores.append(0)
                 fluency_scores.append(0)
@@ -210,9 +219,9 @@ def process_csv_file(csv_path):
                 lip_sync_scores.append(0)
                 localization_scores.append(0)
                 continue
-            print(f"正在处理第 {index + 1}/{total_rows} 行: '{str(chinese_text)}'")
+            print(f"正在处理第 {index + 1}/{total_rows} 行: '{chinese_text}'")
 
-            print(f'使用的提示词模版是：{prompt_template[:100]}...')
+            print(f'使用的提示词模版是：{prompt_template[:50]}...')
             # 调用翻译函数
             english_translation = translate_text(
                 chinese_text,
@@ -224,7 +233,7 @@ def process_csv_file(csv_path):
             translations.append(english_translation)
 
             # 添加延时以避免API限制
-            time.sleep(10)
+            time.sleep(1)
 
             # 对翻译结果进行评分
             if english_translation and not english_translation.startswith("ERROR"):
@@ -250,7 +259,7 @@ def process_csv_file(csv_path):
                 lip_sync_scores.append(0)
                 localization_scores.append(0)
             
-            time.sleep(10)
+           
 
         # 确保列表长度与数据框行数匹配
         if len(translations) != len(df) or len(accuracy_scores) != len(df):
@@ -279,7 +288,7 @@ def process_csv_file(csv_path):
         # 获取相对于BASE_DIR的路径
         rel_path = os.path.relpath(base, BASE_DIR)
         # 创建新的输出目录路径
-        output_dir = os.path.join(BASE_DIR, 'translated_rated', os.path.dirname(rel_path))
+        output_dir = os.path.join(out_put_BASE_DIR, 'translated_rated', os.path.dirname(rel_path))
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
         # 构建完整的输出文件路径
