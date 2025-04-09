@@ -5,11 +5,44 @@ import pandas as pd # translate_text 函数依赖 pandas.isna
 import time # 虽然评分本身可能不需要，但 translate_text 里有，保持一致
 import os # 虽然评分本身可能不需要，但 translate_text 里有，保持一致
 import re # 导入正则表达式库用于解析批量评分结果
+import random # 导入random用于随机选择API密钥
+from itertools import cycle # 导入cycle用于循环迭代API密钥
 
 # --- API 配置 ---
 API_URL = "https://cloud.infini-ai.com/maas/v1/chat/completions"
-API_KEY = "Bearer sk-daz7idir52x7kash" # 请确保这是有效的Key
+# 多个API密钥配置
+API_KEYS = [
+    "Bearer sk-daz7idir52x7kash",  # 原始密钥作为第一个
+    # 以下可以添加更多API密钥
+    # "Bearer sk-your_key_2",
+    # "Bearer sk-your_key_3",
+    # 等等...
+]
+# 使用第一个密钥作为默认密钥
+API_KEY = API_KEYS[0]  
+# 创建一个循环迭代器
+api_key_cycle = cycle(API_KEYS)
+# 当前使用的API密钥索引
+current_api_key_index = 0
+
 MODEL_NAME = "deepseek-v3" # 或者其他适合评分任务的模型
+
+# --- API密钥轮询功能 ---
+def get_next_api_key():
+    """获取下一个API密钥，实现轮询机制"""
+    global current_api_key_index
+    
+    # 如果只有一个API密钥，则直接返回
+    if len(API_KEYS) <= 1:
+        return API_KEYS[0]
+    
+    # 循环使用下一个API密钥
+    current_api_key_index = (current_api_key_index + 1) % len(API_KEYS)
+    return API_KEYS[current_api_key_index]
+
+def get_random_api_key():
+    """随机获取一个API密钥"""
+    return random.choice(API_KEYS)
 
 # --- 评分标准 Prompt 模板 ---
 RATING_PROMPT_TEMPLATE = """
@@ -140,24 +173,33 @@ BATCH_RATING_PROMPT_TEMPLATE = """
 5. 不要添加任何额外的解释文字
 """
 
-# --- 从笔记中复制的 translate_text 函数 ---
-# 注意：此函数现在用于发送评分请求，其 'text' 参数将是包含评分说明和待评分内容的完整prompt
-def translate_text(prompt_content, model_name, api_key, api_url):
+# --- 从笔记中复制的 translate_text 函数，添加轮询逻辑 ---
+def translate_text(prompt_content, model_name, api_key=None, api_url=None):
     """
     调用大模型API执行任务（翻译或评分）。
+    支持API密钥轮询，如果未指定api_key，则自动轮询选择密钥。
 
     参数:
         prompt_content: 发送给大模型的完整提示内容。
         model_name: 使用的模型名称。
-        api_key: API密钥。
-        api_url: API接口地址。
+        api_key: API密钥，如果不指定，则使用轮询机制获取。
+        api_url: API接口地址，如果不指定，则使用默认地址。
 
     返回:
         大模型的响应内容。
     """
     if not prompt_content: # 检查输入prompt是否为空
         return "ERROR: Prompt content is empty"
-
+    
+    # 如果未指定API密钥，则轮询获取下一个
+    if api_key is None:
+        api_key = get_next_api_key()
+        print(f"使用API密钥: {api_key[:15]}... (轮询选择)")
+    
+    # 如果未指定API地址，则使用默认地址
+    if api_url is None:
+        api_url = API_URL
+    
     headers = {
         'Content-Type': "application/json",
         'Accept': "application/json",
@@ -177,9 +219,27 @@ def translate_text(prompt_content, model_name, api_key, api_url):
     })
 
     try:
-        response = requests.post(api_url, headers=headers, data=payload, timeout=90)
-        response.raise_for_status()
-
+        # 增加重试逻辑
+        max_retries = min(3, len(API_KEYS))  # 最多重试次数，不超过可用API密钥数
+        retries = 0
+        
+        while retries < max_retries:
+            try:
+                response = requests.post(api_url, headers=headers, data=payload, timeout=90)
+                response.raise_for_status()
+                break  # 请求成功，跳出重试循环
+            except (requests.exceptions.RequestException, requests.exceptions.HTTPError) as e:
+                retries += 1
+                if retries >= max_retries:
+                    raise  # 达到最大重试次数，抛出异常
+                
+                print(f"API请求失败 (第{retries}次): {e}")
+                # 切换API密钥再试
+                api_key = get_next_api_key()
+                headers['Authorization'] = api_key
+                print(f"尝试使用新API密钥: {api_key[:15]}...")
+                time.sleep(1)  # 稍等一下再重试
+        
         data = response.json()
         # 提取模型返回的内容
         result = data.get('choices', [{}])[0].get('message', {}).get('content', '')
@@ -215,7 +275,7 @@ def translate_text(prompt_content, model_name, api_key, api_url):
         return f"ERROR: 意外错误 ({e})"
 
 # --- 新增的评分函数 ---
-def rate_translation(source_text, translation_text, model_name, api_key, api_url, rating_prompt_template):
+def rate_translation(source_text, translation_text, model_name, api_key=None, api_url=None, rating_prompt_template=None):
     """
     调用大模型对翻译质量进行评分。
 
@@ -223,13 +283,17 @@ def rate_translation(source_text, translation_text, model_name, api_key, api_url
         source_text: 中文原文。
         translation_text: 英文译文。
         model_name: 使用的模型名称。
-        api_key: API密钥。
-        api_url: API接口地址。
-        rating_prompt_template: 包含评分标准的提示词模板。
+        api_key: API密钥，如果不指定，则使用轮询机制获取。
+        api_url: API接口地址，如果不指定，则使用默认地址。
+        rating_prompt_template: 包含评分标准的提示词模板，如不指定则使用默认模板。
 
     返回:
         包含五个维度评分的字典。
     """
+    # 使用默认模板（如果未指定）
+    if rating_prompt_template is None:
+        rating_prompt_template = RATING_PROMPT_TEMPLATE
+        
     # 构建完整的评分prompt
     rating_prompt = rating_prompt_template.format(
         source_text=source_text,
@@ -285,15 +349,15 @@ def rate_translation(source_text, translation_text, model_name, api_key, api_url
         return get_default_scores()
 
 # --- 新增的批量评分函数 ---
-def batch_rate_translations(texts_with_indices, model_name, api_key, api_url):
+def batch_rate_translations(texts_with_indices, model_name, api_key=None, api_url=None):
     """
     批量调用大模型对多个翻译配对进行评分。
 
     参数:
         texts_with_indices: 包含索引、原文和译文的列表，每项格式为(index, source_text, translation_text)
         model_name: 使用的模型名称。
-        api_key: API密钥。
-        api_url: API接口地址。
+        api_key: API密钥，如果不指定，则使用轮询机制获取。
+        api_url: API接口地址，如果不指定，则使用默认地址。
 
     返回:
         字典，键为索引，值为包含五个维度评分的子字典。
@@ -404,10 +468,8 @@ if __name__ == "__main__":
     final_score = rate_translation(
         example_source,
         example_translation,
-        MODEL_NAME,
-        API_KEY,
-        API_URL,
-        RATING_PROMPT_TEMPLATE
+        MODEL_NAME
+        # 不指定API密钥，使用轮询机制
     )
 
     print(f"评分结果: {final_score}")
@@ -423,9 +485,8 @@ if __name__ == "__main__":
     print(f"正在对 {len(example_pairs)} 个翻译配对进行批量评分...")
     batch_scores = batch_rate_translations(
         example_pairs,
-        MODEL_NAME,
-        API_KEY,
-        API_URL
+        MODEL_NAME
+        # 不指定API密钥，使用轮询机制
     )
     
     for index, scores in batch_scores.items():

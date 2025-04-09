@@ -5,6 +5,8 @@ import json
 import time
 import os
 import re # 导入正则表达式库用于解析
+import random # 导入random用于随机选择API密钥
+from itertools import cycle # 导入cycle用于循环迭代API密钥
 # 移除评分相关的导入
 # from rating_script import rate_translation, RATING_PROMPT_TEMPLATE
 from constant import *
@@ -13,8 +15,10 @@ from constant import *
 from rating_script import rate_translation, RATING_PROMPT_TEMPLATE, batch_rate_translations
 # 显式导入评分API配置并重命名以区分
 from rating_script import API_URL as RATING_API_URL
-from rating_script import API_KEY as RATING_API_KEY
+from rating_script import API_KEYS as RATING_API_KEYS
 from rating_script import MODEL_NAME as RATING_MODEL_NAME
+# 导入轮询相关函数
+from rating_script import get_next_api_key as get_next_rating_api_key
 
 # --- 配置部分 ---
 # 基础目录路径
@@ -24,18 +28,103 @@ from rating_script import MODEL_NAME as RATING_MODEL_NAME
 BASE_DIR = r"E:\\Apple\\电视剧"
 out_put_BASE_DIR = r"E:\\Apple"
 
-# 翻译 API 接口地址
+# API密钥配置文件路径
+API_KEYS_CONFIG_FILE = "api_keys.json"
+
+# 默认翻译 API 接口地址
 TRANSLATE_API_URL = "https://api.deepseek.com/v1/chat/completions"
-# 翻译 API 密钥（Bearer Token格式）
-TRANSLATE_API_KEY = "Bearer sk-9e2f9bc9546d4d0ca0631cca3ffe819e"
+# 默认翻译 API 密钥
+DEFAULT_TRANSLATE_API_KEYS = [
+    "Bearer sk-daz7idir52x7kash",  # 原始密钥作为第一个
+]
+
+# 尝试从配置文件加载API密钥
+def load_api_keys():
+    """从配置文件加载API密钥"""
+    global TRANSLATE_API_KEYS, RATING_API_KEYS
+    
+    try:
+        if os.path.exists(API_KEYS_CONFIG_FILE):
+            with open(API_KEYS_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                keys_config = json.load(f)
+                
+                # 加载翻译API密钥
+                translate_keys = keys_config.get('translate_api_keys', [])
+                if translate_keys and isinstance(translate_keys, list) and len(translate_keys) > 0:
+                    # 确保每个密钥都有Bearer前缀
+                    translate_keys = ["Bearer " + k.replace("Bearer ", "") if not k.startswith("Bearer ") else k for k in translate_keys]
+                    TRANSLATE_API_KEYS = translate_keys
+                    print(f"已从配置文件加载 {len(TRANSLATE_API_KEYS)} 个翻译API密钥")
+                else:
+                    TRANSLATE_API_KEYS = DEFAULT_TRANSLATE_API_KEYS
+                    print(f"配置文件中未找到有效的翻译API密钥，使用默认密钥")
+                
+                # 加载评分API密钥 (如果存在)
+                rating_keys = keys_config.get('rating_api_keys', [])
+                if rating_keys and isinstance(rating_keys, list) and len(rating_keys) > 0:
+                    # 确保每个密钥都有Bearer前缀
+                    rating_keys = ["Bearer " + k.replace("Bearer ", "") if not k.startswith("Bearer ") else k for k in rating_keys]
+                    # 更新rating_script.py中的API_KEYS
+                    import rating_script
+                    rating_script.API_KEYS = rating_keys
+                    # 同时更新本地引用
+                    globals()['RATING_API_KEYS'] = rating_keys
+                    print(f"已从配置文件加载 {len(rating_keys)} 个评分API密钥")
+    except Exception as e:
+        print(f"加载API密钥配置文件时出错: {e}")
+        TRANSLATE_API_KEYS = DEFAULT_TRANSLATE_API_KEYS
+        print("使用默认API密钥配置")
+
+# 创建示例配置文件（如果不存在）
+def create_example_config_file():
+    """创建示例API密钥配置文件（如果不存在）"""
+    if not os.path.exists(API_KEYS_CONFIG_FILE):
+        example_config = {
+            "translate_api_keys": [
+                "sk-9e2f9bc9546d4d0ca0631cca3ffe819e",  # 默认不带Bearer前缀，程序会自动添加
+                # 可以添加更多密钥
+            ],
+            "rating_api_keys": [
+                "sk-daz7idir52x7kash",
+                # 可以添加更多密钥
+            ]
+        }
+        
+        try:
+            with open(API_KEYS_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(example_config, f, indent=4)
+            print(f"已创建示例API密钥配置文件: {API_KEYS_CONFIG_FILE}")
+            print("请编辑此文件添加您的API密钥。")
+        except Exception as e:
+            print(f"创建示例配置文件时出错: {e}")
+
+# 初始化API密钥配置
+create_example_config_file()  # 如果文件不存在，则创建示例配置
+load_api_keys()  # 尝试加载配置
+
+# 设置翻译API密钥和当前索引
+TRANSLATE_API_KEYS = TRANSLATE_API_KEYS if 'TRANSLATE_API_KEYS' in locals() else DEFAULT_TRANSLATE_API_KEYS
+current_translate_api_key_index = 0
+
 # 翻译使用的模型名称
 TRANSLATE_MODEL_NAME = "deepseek-chat"
 
-# API_URL = "https://cloud.infini-ai.com/maas/v1/chat/completions"
-# # API密钥（Bearer Token格式）
-# API_KEY = "Bearer sk-daz7idir52x7kash"
-# # 使用的模型名称
-# MODEL_NAME = "deepseek-v3"
+# --- API密钥轮询功能 ---
+def get_next_translate_api_key():
+    """获取下一个翻译API密钥，实现轮询机制"""
+    global current_translate_api_key_index
+    
+    # 如果只有一个API密钥，则直接返回
+    if len(TRANSLATE_API_KEYS) <= 1:
+        return TRANSLATE_API_KEYS[0]
+    
+    # 循环使用下一个API密钥
+    current_translate_api_key_index = (current_translate_api_key_index + 1) % len(TRANSLATE_API_KEYS)
+    return TRANSLATE_API_KEYS[current_translate_api_key_index]
+
+def get_random_translate_api_key():
+    """随机获取一个翻译API密钥"""
+    return random.choice(TRANSLATE_API_KEYS)
 
 # --- 修改：批量翻译提示词模板 (带索引) ---
 BATCH_TRANSLATION_PROMPT_TEMPLATE = """
@@ -51,15 +140,31 @@ Chinese Lines (with index prefix):
 {combined_texts}
 """
 
-# --- 翻译函数 (现在明确使用翻译配置) ---
-def translate_text(text, model_name, api_key, api_url, prompt):
+# --- 翻译函数 (添加轮询逻辑) ---
+def translate_text(text, model_name, api_key=None, api_url=None, prompt=None):
     """
-    调用大模型API进行文本翻译
+    调用大模型API进行文本翻译，支持API密钥轮询
+    
+    参数:
+        text: 要翻译的文本（可以为空，因为prompt中已包含完整内容）
+        model_name: 使用的模型名称
+        api_key: API密钥，如不指定则自动轮询选择
+        api_url: API接口地址，如不指定则使用默认地址
+        prompt: 完整的提示词
     """
+    # 如果未指定API密钥，则轮询获取下一个
+    if api_key is None:
+        api_key = get_next_translate_api_key()
+        print(f"使用翻译API密钥: {api_key[:15]}... (轮询选择)")
+    
+    # 如果未指定API地址，则使用默认地址
+    if api_url is None:
+        api_url = TRANSLATE_API_URL
+        
     headers = {
         'Content-Type': "application/json",
         'Accept': "application/json",
-        'Authorization': api_key # 使用传入的 API Key
+        'Authorization': api_key # 使用传入的或轮询选择的 API Key
     }
     payload = json.dumps({
         "model": model_name, # 使用传入的模型名称
@@ -74,8 +179,27 @@ def translate_text(text, model_name, api_key, api_url, prompt):
         "max_tokens": 8192 
     })
     try:
-        response = requests.post(api_url, headers=headers, data=payload, timeout=300)
-        response.raise_for_status()
+        # 增加重试逻辑
+        max_retries = min(3, len(TRANSLATE_API_KEYS))  # 最多重试次数，不超过可用API密钥数
+        retries = 0
+        
+        while retries < max_retries:
+            try:
+                response = requests.post(api_url, headers=headers, data=payload, timeout=300)
+                response.raise_for_status()
+                break  # 请求成功，跳出重试循环
+            except (requests.exceptions.RequestException, requests.exceptions.HTTPError) as e:
+                retries += 1
+                if retries >= max_retries:
+                    raise  # 达到最大重试次数，抛出异常
+                
+                print(f"翻译API请求失败 (第{retries}次): {e}")
+                # 切换API密钥再试
+                api_key = get_next_translate_api_key()
+                headers['Authorization'] = api_key
+                print(f"尝试使用新翻译API密钥: {api_key[:15]}...")
+                time.sleep(1)  # 稍等一下再重试
+        
         data = response.json()
         translation = data.get('choices', [{}])[0].get('message', {}).get('content', '')
         translation = translation.strip()
@@ -176,7 +300,7 @@ def process_file(file_path):
             # print(f"使用的提示词 (部分): {full_prompt}[:600]...") # 调试时可以取消注释
 
             translation_result = translate_text(
-                "", TRANSLATE_MODEL_NAME, TRANSLATE_API_KEY, TRANSLATE_API_URL, full_prompt
+                "", TRANSLATE_MODEL_NAME, None, None, full_prompt
             )
             
             print(f"翻译 API 原始返回 (前500字符): {translation_result}...")
@@ -246,9 +370,8 @@ def process_file(file_path):
             print(f"准备调用评分 API 评分 {num_to_rate} 行翻译...")
             batch_score_results = batch_rate_translations(
                 texts_to_rate_with_indices,
-                RATING_MODEL_NAME,   # 使用评分模型
-                RATING_API_KEY,      # 使用评分 API Key
-                RATING_API_URL       # 使用评分 API URL
+                RATING_MODEL_NAME   # 使用评分模型
+                # 不指定API密钥，使用轮询机制
             )
             
             # 统计评分结果
@@ -324,8 +447,22 @@ def find_and_process_files(base_dir):
     print(f"处理失败文件数: {error_files}")
     print(f"跳过非目标文件数: {skipped_files}")
 
-# --- 主程序入口 (不变) ---
+# --- 主程序入口 (更新以增加密钥配置信息) ---
 if __name__ == "__main__":
+    print("\n===== AI配音翻译评分工具 =====")
+    
+    # 显示API密钥配置信息
+    translate_key_count = len(TRANSLATE_API_KEYS)
+    rating_key_count = len(RATING_API_KEYS)
+    print(f"API密钥配置状态: 翻译API密钥 {translate_key_count} 个, 评分API密钥 {rating_key_count} 个")
+    print(f"API密钥配置文件: {os.path.abspath(API_KEYS_CONFIG_FILE)}")
+    
+    if translate_key_count == 1 and TRANSLATE_API_KEYS[0] == DEFAULT_TRANSLATE_API_KEYS[0]:
+        print("警告: 使用默认翻译API密钥，建议在配置文件中添加多个API密钥以避免限流")
+    if rating_key_count == 1 and RATING_API_KEYS[0] == "Bearer sk-daz7idir52x7kash":
+        print("警告: 使用默认评分API密钥，建议在配置文件中添加多个API密钥以避免限流")
+        
+    # 继续原有的初始化流程
     if not os.path.exists(BASE_DIR): print(f"错误: 找不到目录 {BASE_DIR}"); exit()
     if not os.path.exists(out_put_BASE_DIR):
         print(f"输出目录 {out_put_BASE_DIR} 不存在，将尝试创建。")
