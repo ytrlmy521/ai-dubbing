@@ -32,7 +32,7 @@ out_put_BASE_DIR = r"E:\\Apple"
 API_KEYS_CONFIG_FILE = "api_keys.json"
 
 # 默认翻译 API 接口地址
-TRANSLATE_API_URL = "https://api.deepseek.com/v1/chat/completions"
+TRANSLATE_API_URL = "https://cloud.infini-ai.com/maas/v1/chat/completions"
 # 默认翻译 API 密钥
 DEFAULT_TRANSLATE_API_KEYS = [
     "Bearer sk-daz7idir52x7kash",  # 原始密钥作为第一个
@@ -81,7 +81,7 @@ def create_example_config_file():
     if not os.path.exists(API_KEYS_CONFIG_FILE):
         example_config = {
             "translate_api_keys": [
-                "sk-9e2f9bc9546d4d0ca0631cca3ffe819e",  # 默认不带Bearer前缀，程序会自动添加
+                "sk-daz7idir52x7kash",  # 默认不带Bearer前缀，程序会自动添加
                 # 可以添加更多密钥
             ],
             "rating_api_keys": [
@@ -107,7 +107,7 @@ TRANSLATE_API_KEYS = TRANSLATE_API_KEYS if 'TRANSLATE_API_KEYS' in locals() else
 current_translate_api_key_index = 0
 
 # 翻译使用的模型名称
-TRANSLATE_MODEL_NAME = "deepseek-chat"
+TRANSLATE_MODEL_NAME = "deepseek-v3"
 
 # --- API密钥轮询功能 ---
 def get_next_translate_api_key():
@@ -366,30 +366,48 @@ def process_file(file_path):
         df['localization'] = 0
         
         if num_to_rate > 0:
-            # 调用批量评分函数
-            print(f"准备调用评分 API 评分 {num_to_rate} 行翻译...")
-            batch_score_results = batch_rate_translations(
-                texts_to_rate_with_indices,
-                RATING_MODEL_NAME   # 使用评分模型
-                # 不指定API密钥，使用轮询机制
-            )
-            
-            # 统计评分结果
+            # 将翻译分成多个小批次进行评分，每批次最多10条
+            batch_size = 10
+            total_batches = (num_to_rate + batch_size - 1) // batch_size  # 向上取整
             rated_count = 0
-            for index, scores in batch_score_results.items():
-                df.loc[index, 'accuracy'] = scores.get('accuracy', 0)
-                df.loc[index, 'fluency'] = scores.get('fluency', 0)
-                df.loc[index, 'contextual'] = scores.get('contextual', 0)
-                df.loc[index, 'lipsync'] = scores.get('lipsync', 0)
-                df.loc[index, 'localization'] = scores.get('localization', 0)
-                rated_count += 1
+            
+            print(f"将分成 {total_batches} 个批次进行评分，每批次最多 {batch_size} 条翻译")
+            
+            for batch_idx in range(total_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, num_to_rate)
+                current_batch = texts_to_rate_with_indices[start_idx:end_idx]
+                
+                print(f"\n处理第 {batch_idx + 1}/{total_batches} 批评分 (共 {len(current_batch)} 条)...")
+                
+                # 调用批量评分函数评分当前批次
+                batch_score_results = batch_rate_translations(
+                    current_batch,
+                    RATING_MODEL_NAME   # 使用评分模型
+                    # 不指定API密钥，使用轮询机制
+                )
+                
+                # 更新DataFram中的评分
+                for index, scores in batch_score_results.items():
+                    df.loc[index, 'accuracy'] = scores.get('accuracy', 0)
+                    df.loc[index, 'fluency'] = scores.get('fluency', 0)
+                    df.loc[index, 'contextual'] = scores.get('contextual', 0)
+                    df.loc[index, 'lipsync'] = scores.get('lipsync', 0)
+                    df.loc[index, 'localization'] = scores.get('localization', 0)
+                    rated_count += 1
+                
+                # 检查是否有评分缺失
+                expected_indices = {item[0] for item in current_batch}
+                missing_indices = expected_indices - set(batch_score_results.keys())
+                if missing_indices:
+                    print(f"警告: 当前批次中以下 {len(missing_indices)} 条记录的评分结果缺失: {sorted(list(missing_indices))}")
+                
+                # 批次之间增加短暂延时，避免API限制
+                if batch_idx < total_batches - 1:
+                    print("等待7秒后继续下一批评分...")
+                    time.sleep(7)
             
             print(f"\n评分完成。共对 {rated_count} 行进行了有效评分。")
-            
-            # 检查是否有评分缺失
-            missing_indices = set(original_rating_indices) - set(batch_score_results.keys())
-            if missing_indices:
-                print(f"警告: 以下 {len(missing_indices)} 条记录的评分结果缺失: {sorted(list(missing_indices))}")
         else:
             print("没有找到有效的翻译需要评分。")
 
