@@ -4,6 +4,7 @@ import json
 import pandas as pd # translate_text 函数依赖 pandas.isna
 import time # 虽然评分本身可能不需要，但 translate_text 里有，保持一致
 import os # 虽然评分本身可能不需要，但 translate_text 里有，保持一致
+import re # 导入正则表达式库用于解析批量评分结果
 
 # --- API 配置 ---
 API_URL = "https://cloud.infini-ai.com/maas/v1/chat/completions"
@@ -29,8 +30,8 @@ RATING_PROMPT_TEMPLATE = """
     - 0-9 分: 翻译严重失真，原文意思丧失。
         - 示例: 
         - 原文: "你别逼我动手。" 
-        - 翻译: "Don’t force me to act." (30 分)
-        - 翻译: "You don’t make me move."  (10 分)
+        - 翻译: "Don't force me to act." (30 分)
+        - 翻译: "You don't make me move."  (10 分)
 2.  流畅度 (Fluency) - 25分: 是否符合英语母语者表达习惯，语法正确流畅。
       - 22-25 分: 翻译自然流畅，如英语母语者表达。
       - 15-21 分: 翻译较自然，但有轻微不地道之处。
@@ -38,7 +39,7 @@ RATING_PROMPT_TEMPLATE = """
       - 0-7 分: 翻译生硬，语法或表达严重不当。
         - 示例: 
         - 原文: "这事儿没那么简单。" 
-        - 翻译: "It’s not that simple." (25 分)
+        - 翻译: "It's not that simple." (25 分)
         - 翻译: "This matter not so simple." (5 分)
 3.  语境适应性 (Contextual Appropriateness) - 20分: 是否符合影视剧场景、角色语气、情绪、性格和剧情。
       - 18-20 分: 翻译完美契合语境，语气和角色一致。
@@ -49,7 +50,7 @@ RATING_PROMPT_TEMPLATE = """
         - 场景: 武侠片中高手对决 
         - 原文: "来吧，决一死战。"
         - 翻译: "Come on, fight to the death." (20 分)
-        - 翻译: "Let’s have a meeting." (0 分)
+        - 翻译: "Let's have a meeting." (0 分)
 4.  对口型匹配度 (Lip-Sync Compatibility) - 15分: 英文单词数、音节数和节奏是否与中文口型接近（考虑语流节奏）。
       - 13-15 分: 翻译音节和节奏高度匹配，配音几乎无缝。
       - 9-12 分: 翻译基本匹配，需轻微调整口型。
@@ -57,8 +58,8 @@ RATING_PROMPT_TEMPLATE = """
       - 0-4 分: 翻译完全无法对口型，音节数或节奏严重偏离。
         - 示例: 
         - 原文: "我不会让你走。" (6 个音节) 
-        - 翻译: "I won’t let you go."  (6 个音节，15 分)
-        - 翻译: "I will not allow you to leave." (9 个音节，5 分)
+        - 翻译: "I won't let you go."  (6 个音节，15 分)
+        - 翻译: "I will not allow you to leave." (9 个音节, 5 分)
 5.  文化适用性 (Localization) - 10分: 是否适应目标语英语观众文化背景，避免直译障碍。
       - 9-10 分: 翻译充分本地化，符合英语文化习惯。
       - 6-8 分: 翻译基本适配，但有些细节未优化。
@@ -67,7 +68,7 @@ RATING_PROMPT_TEMPLATE = """
        - 示例: 
         - 原文: "晒黑了不好看。" 
         - 翻译: "Too much sun will hurt your skin." (10 分)
-        - 翻译: "Dark skin isn’t attractive." (0 分)
+        - 翻译: "Dark skin isn't attractive." (0 分)
 
 评估以下内容：
 中文原文: "{source_text}"
@@ -82,12 +83,61 @@ accuracy:XX,fluency:XX,contextual:XX,lipsync:XX,localization:XX
 1. 所有分值必须是0-30之间的整数
 2. 严格按照上述格式返回，不要包含任何其他文字
 3. 使用英文逗号分隔各个评分
-准确性 (Accuracy) - 30分
-流畅度 (Fluency) - 25分
-语境适应性 (Contextual Appropriateness) - 20分
-对口型匹配度 (Lip-Sync Compatibility) - 15分
-文化适用性 (Localization) - 10分
+"""
 
+# --- 批量评分提示词模板 ---
+BATCH_RATING_PROMPT_TEMPLATE = """
+你是一个专业的影视剧译制翻译质量评估员。请根据以下评分标准，对提供的一批中文原文和英文译文配对进行评估，按照以下五个维度进行评分。
+
+注意：评分标准（每个维度分值都不一样）:
+     准确性 (Accuracy) - 30分
+     流畅度 (Fluency) - 25分
+     语境适应性 (Contextual Appropriateness) - 20分
+     对口型匹配度 (Lip-Sync Compatibility) - 15分
+     文化适用性 (Localization) - 10分
+
+1.  准确性 (Accuracy) - 30分: 是否准确传达原文含义，无遗漏或曲解。
+    - 27-30 分: 翻译完全准确，无任何错误。
+    - 20-26 分: 翻译基本准确，存在轻微偏差但不影响理解。
+    - 10-19 分: 翻译有明显错误，但核心意思尚存。
+    - 0-9 分: 翻译严重失真，原文意思丧失。
+2.  流畅度 (Fluency) - 25分: 是否符合英语母语者表达习惯，语法正确流畅。
+      - 22-25 分: 翻译自然流畅，如英语母语者表达。
+      - 15-21 分: 翻译较自然，但有轻微不地道之处。
+      - 8-14 分: 翻译可理解，但明显非母语风格。
+      - 0-7 分: 翻译生硬，语法或表达严重不当。
+3.  语境适应性 (Contextual Appropriateness) - 20分: 是否符合影视剧场景、角色语气、情绪、性格和剧情。
+      - 18-20 分: 翻译完美契合语境，语气和角色一致。
+      - 12-17 分: 翻译基本符合语境，但语气稍有偏差。
+      - 6-11 分: 翻译与语境脱节，角色性格体现不足。
+      - 0-5 分: 翻译完全无视语境，语气或含义不符。
+4.  对口型匹配度 (Lip-Sync Compatibility) - 15分: 英文单词数、音节数和节奏是否与中文口型接近（考虑语流节奏）。
+      - 13-15 分: 翻译音节和节奏高度匹配，配音几乎无缝。
+      - 9-12 分: 翻译基本匹配，需轻微调整口型。
+      - 5-8 分: 翻译勉强可用，但节奏或音节明显不符。
+      - 0-4 分: 翻译完全无法对口型，音节数或节奏严重偏离。
+5.  文化适用性 (Localization) - 10分: 是否适应目标语英语观众文化背景，避免直译障碍。
+      - 9-10 分: 翻译充分本地化，符合英语文化习惯。
+      - 6-8 分: 翻译基本适配，但有些细节未优化。
+      - 3-5 分: 翻译未完全本地化，可能引发轻微误解。
+      - 0-2 分: 翻译忽视文化差异，显得突兀或费解。
+
+下面是需要评分的翻译内容，每行以索引号开头，格式为"[索引号] 中文原文 ||| 英文译文"：
+
+{combined_texts}
+
+请对每个翻译配对进行评分，并按照以下格式返回评分结果：
+[索引号] accuracy:XX,fluency:XX,contextual:XX,lipsync:XX,localization:XX
+
+例如：
+[123] accuracy:25,fluency:20,contextual:15,lipsync:10,localization:5
+
+请确保:
+1. 每个评分结果前必须有原始索引号，格式为 [索引号]，与输入的索引号完全一致
+2. 所有分值必须是0-30之间的整数
+3. 每行评分结果独立成行
+4. 使用英文逗号分隔各个评分
+5. 不要添加任何额外的解释文字
 """
 
 # --- 从笔记中复制的 translate_text 函数 ---
@@ -234,6 +284,100 @@ def rate_translation(source_text, translation_text, model_name, api_key, api_url
         print(f"解析评分结果时发生错误: {e}")
         return get_default_scores()
 
+# --- 新增的批量评分函数 ---
+def batch_rate_translations(texts_with_indices, model_name, api_key, api_url):
+    """
+    批量调用大模型对多个翻译配对进行评分。
+
+    参数:
+        texts_with_indices: 包含索引、原文和译文的列表，每项格式为(index, source_text, translation_text)
+        model_name: 使用的模型名称。
+        api_key: API密钥。
+        api_url: API接口地址。
+
+    返回:
+        字典，键为索引，值为包含五个维度评分的子字典。
+    """
+    if not texts_with_indices:
+        print("警告: 没有有效的翻译需要评分")
+        return {}
+        
+    # 构建合并的评分文本
+    combined_texts = []
+    for index, source, translation in texts_with_indices:
+        combined_texts.append(f"[{index}] {source} ||| {translation}")
+    
+    combined_text_str = "\n".join(combined_texts)
+    
+    # 构建完整的评分提示词
+    full_prompt = BATCH_RATING_PROMPT_TEMPLATE.format(
+        combined_texts=combined_text_str
+    )
+    
+    # 调用API获取评分结果
+    score_text = translate_text(full_prompt, model_name, api_key, api_url)
+    
+    # 如果返回错误，返回空字典
+    if score_text.startswith("ERROR"):
+        print(f"批量评分API返回错误: {score_text}")
+        return {}
+    
+    # 解析评分结果
+    scores_by_index = {}
+    try:
+        # 按行分割结果
+        lines = score_text.strip().split('\n')
+        line_pattern = re.compile(r"^\[(\d+)\]\s*accuracy:(\d+),fluency:(\d+),contextual:(\d+),lipsync:(\d+),localization:(\d+)$")
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            match = line_pattern.match(line)
+            if match:
+                try:
+                    index = int(match.group(1))
+                    accuracy = int(match.group(2))
+                    fluency = int(match.group(3))
+                    contextual = int(match.group(4))
+                    lipsync = int(match.group(5))
+                    localization = int(match.group(6))
+                    
+                    # 验证分值范围
+                    if 0 <= accuracy <= 30 and 0 <= fluency <= 25 and 0 <= contextual <= 20 and 0 <= lipsync <= 15 and 0 <= localization <= 10:
+                        scores_by_index[index] = {
+                            'accuracy': accuracy,
+                            'fluency': fluency,
+                            'contextual': contextual,
+                            'lipsync': lipsync,
+                            'localization': localization
+                        }
+                    else:
+                        print(f"警告: 索引 {index} 的分值超出范围: accuracy={accuracy}, fluency={fluency}, contextual={contextual}, lipsync={lipsync}, localization={localization}")
+                        scores_by_index[index] = get_default_scores()
+                except ValueError:
+                    print(f"警告: 索引或分值解析失败: {line}")
+            else:
+                print(f"警告: 评分结果格式不匹配: {line}")
+        
+        # 检查是否所有索引都有对应的评分
+        indices_with_scores = set(scores_by_index.keys())
+        expected_indices = set(index for index, _, _ in texts_with_indices)
+        missing_indices = expected_indices - indices_with_scores
+        
+        if missing_indices:
+            print(f"警告: 以下索引的评分结果缺失: {missing_indices}")
+            # 为缺失的索引添加默认分数
+            for index in missing_indices:
+                scores_by_index[index] = get_default_scores()
+                
+        return scores_by_index
+        
+    except Exception as e:
+        print(f"解析批量评分结果时发生错误: {e}")
+        return {}
+
 def get_default_scores():
     """返回默认的评分字典"""
     return {
@@ -269,19 +413,20 @@ if __name__ == "__main__":
     print(f"评分结果: {final_score}")
 
     print("-" * 30)
-    # --- 另一个示例 ---
-    example_source_2 = "我想上厕所"
-    example_translation_2 = "I want to go to the toilet"
-    print(f"正在对以下翻译进行评分:")
-    print(f"  原文: {example_source_2}")
-    print(f"  译文: {example_translation_2}")
-    print("-" * 30)
-    final_score_2 = rate_translation(
-        example_source_2,
-        example_translation_2,
+    # --- 批量评分示例 ---
+    example_pairs = [
+        (0, "你别逼我动手。", "Don't force me to act."),
+        (1, "我想上厕所", "I want to go to the toilet"),
+        (2, "这事儿没那么简单。", "It's not that simple.")
+    ]
+    
+    print(f"正在对 {len(example_pairs)} 个翻译配对进行批量评分...")
+    batch_scores = batch_rate_translations(
+        example_pairs,
         MODEL_NAME,
         API_KEY,
-        API_URL,
-        RATING_PROMPT_TEMPLATE
+        API_URL
     )
-    print(f"评分结果: {final_score_2}") 
+    
+    for index, scores in batch_scores.items():
+        print(f"索引 {index} 的评分结果: {scores}") 

@@ -10,7 +10,7 @@ import re # 导入正则表达式库用于解析
 from constant import *
 
 # --- 新增：从 rating_script 导入评分相关组件和配置 ---
-from rating_script import rate_translation, RATING_PROMPT_TEMPLATE
+from rating_script import rate_translation, RATING_PROMPT_TEMPLATE, batch_rate_translations
 # 显式导入评分API配置并重命名以区分
 from rating_script import API_URL as RATING_API_URL
 from rating_script import API_KEY as RATING_API_KEY
@@ -179,7 +179,7 @@ def process_file(file_path):
                 "", TRANSLATE_MODEL_NAME, TRANSLATE_API_KEY, TRANSLATE_API_URL, full_prompt
             )
             
-            print(f"翻译 API 原始返回 (前500字符): {translation_result[:500]}...")
+            print(f"翻译 API 原始返回 (前500字符): {translation_result}...")
             
             # 基于索引处理翻译结果
             if translation_result and not translation_result.startswith("ERROR"):
@@ -212,16 +212,12 @@ def process_file(file_path):
                 for index in original_indices:
                     df.loc[index, 'target-translation'] = f"ERROR: API call failed ({translation_result})"
 
-        # --- 逐行评分 --- 
-        print("\n开始逐行调用评分 API...")
-        accuracy_scores = []
-        fluency_scores = []
-        contextual_scores = []
-        lipsync_scores = []
-        localization_scores = []
+        # --- 批量评分 --- 
+        print("\n开始准备批量评分...")
+        texts_to_rate_with_indices = []
+        original_rating_indices = []
         total_rows = len(df)
-        rated_count = 0
-
+        
         for index, row in df.iterrows():
             chinese_text = str(row['transcription']) if pd.notna(row['transcription']) else ''
             chinese_text = chinese_text.rstrip(',').strip()
@@ -232,51 +228,47 @@ def process_file(file_path):
                            english_translation and not english_translation.startswith("ERROR"))
 
             if should_rate:
-                print(f"  正在评分第 {index + 1}/{total_rows} 行: 原文='{chinese_text[:30]}...', 译文='{english_translation[:30]}...'", end='')
-                # 调用评分函数 (使用 rating_script 的配置)
-                scores = rate_translation(
-                    chinese_text,
-                    english_translation,
-                    RATING_MODEL_NAME, # 使用评分模型
-                    RATING_API_KEY,    # 使用评分 API Key
-                    RATING_API_URL,    # 使用评分 API URL
-                    RATING_PROMPT_TEMPLATE
-                )
-                print(f" -> 评分: {scores}")
-                accuracy_scores.append(scores.get('accuracy', 0))
-                fluency_scores.append(scores.get('fluency', 0))
-                contextual_scores.append(scores.get('contextual', 0))
-                lipsync_scores.append(scores.get('lipsync', 0))
-                localization_scores.append(scores.get('localization', 0))
-                rated_count += 1
-                time.sleep(1) # 添加1秒延时，避免过于频繁请求评分 API
-            else:
-                # 对于无效数据或翻译失败的行，填充0分
-                if not should_rate:
-                     print(f"  跳过评分第 {index + 1}/{total_rows} 行 (无效原文/译文或翻译错误)")
-                accuracy_scores.append(0)
-                fluency_scores.append(0)
-                contextual_scores.append(0)
-                lipsync_scores.append(0)
-                localization_scores.append(0)
+                texts_to_rate_with_indices.append((index, chinese_text, english_translation))
+                original_rating_indices.append(index)
         
-        print(f"\n评分完成。共对 {rated_count} 行进行了有效评分。")
-
-        # --- 添加评分列到 DataFrame --- 
-        if len(accuracy_scores) == len(df): # 安全检查
-            df['accuracy'] = accuracy_scores
-            df['fluency'] = fluency_scores
-            df['contextual'] = contextual_scores
-            df['lipsync'] = lipsync_scores
-            df['localization'] = localization_scores
+        num_to_rate = len(texts_to_rate_with_indices)
+        print(f"共找到 {num_to_rate} 行有效翻译需要评分")
+        
+        # 初始化评分列
+        df['accuracy'] = 0
+        df['fluency'] = 0
+        df['contextual'] = 0
+        df['lipsync'] = 0
+        df['localization'] = 0
+        
+        if num_to_rate > 0:
+            # 调用批量评分函数
+            print(f"准备调用评分 API 评分 {num_to_rate} 行翻译...")
+            batch_score_results = batch_rate_translations(
+                texts_to_rate_with_indices,
+                RATING_MODEL_NAME,   # 使用评分模型
+                RATING_API_KEY,      # 使用评分 API Key
+                RATING_API_URL       # 使用评分 API URL
+            )
+            
+            # 统计评分结果
+            rated_count = 0
+            for index, scores in batch_score_results.items():
+                df.loc[index, 'accuracy'] = scores.get('accuracy', 0)
+                df.loc[index, 'fluency'] = scores.get('fluency', 0)
+                df.loc[index, 'contextual'] = scores.get('contextual', 0)
+                df.loc[index, 'lipsync'] = scores.get('lipsync', 0)
+                df.loc[index, 'localization'] = scores.get('localization', 0)
+                rated_count += 1
+            
+            print(f"\n评分完成。共对 {rated_count} 行进行了有效评分。")
+            
+            # 检查是否有评分缺失
+            missing_indices = set(original_rating_indices) - set(batch_score_results.keys())
+            if missing_indices:
+                print(f"警告: 以下 {len(missing_indices)} 条记录的评分结果缺失: {sorted(list(missing_indices))}")
         else:
-            print(f"错误: 评分结果数量 ({len(accuracy_scores)}) 与 DataFrame 行数 ({len(df)}) 不匹配! 将不添加评分列。")
-            # 可以选择填充0或者抛出错误
-            df['accuracy'] = 0
-            df['fluency'] = 0
-            df['contextual'] = 0
-            df['lipsync'] = 0
-            df['localization'] = 0
+            print("没有找到有效的翻译需要评分。")
 
         # --- 文件保存 --- 
         # 更新最终列列表以包含评分
