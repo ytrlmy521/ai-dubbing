@@ -22,11 +22,11 @@ from rating_script import get_next_api_key as get_next_rating_api_key
 
 # --- 配置部分 ---
 # 基础目录路径
-# BASE_DIR = r"C:\\Users\\User\\Downloads\\AI配音中翻英台本 0320\\AI配音中翻英台本\\电视剧"
-# out_put_BASE_DIR = r"C:\\Users\\User\\Downloads\\AI配音中翻英台本 0320\\AI配音中翻英台本"
+BASE_DIR = r"C:\\Users\\User\\Downloads\\AI配音中翻英台本 0320\\AI配音中翻英台本\\电视剧"
+out_put_BASE_DIR = r"C:\\Users\\User\\Downloads\\AI配音中翻英台本 0320\\AI配音中翻英台本"
 
-BASE_DIR = r"E:\\Apple\\电视剧"
-out_put_BASE_DIR = r"E:\\Apple"
+# BASE_DIR = r"E:\\Apple\\电视剧"
+# out_put_BASE_DIR = r"E:\\Apple"
 
 # API密钥配置文件路径
 API_KEYS_CONFIG_FILE = "api_keys.json"
@@ -136,8 +136,12 @@ Translate the following Chinese lines into English. Each line below starts with 
 Return *only* the translated English lines, each prefixed with its corresponding original index, colon, and space (e.g., "123: translation"), each on a new line. Maintain the exact same order.
 Do not add any extra text, explanations, greetings, or numbering other than the required index prefix.
 
+IMPORTANT: You MUST translate ALL provided lines and keep ALL original index numbers in your response. Verify that each source line's index appears in your response exactly once.
+
 Chinese Lines (with index prefix):
 {combined_texts}
+
+Required index numbers that MUST appear in your response: {required_indices}
 """
 
 # --- 翻译函数 (添加轮询逻辑) ---
@@ -175,7 +179,7 @@ def translate_text(text, model_name, api_key=None, api_url=None, prompt=None):
             }
         ],
         "stream": False,
-        "temperature": 0.7, 
+        "temperature": 0.5, # 降低温度以获得更确定性的结果
         "max_tokens": 8192 
     })
     try:
@@ -219,6 +223,106 @@ def translate_text(text, model_name, api_key=None, api_url=None, prompt=None):
     except Exception as e:
         print(f"翻译过程中发生意外错误: {e}")
         return f"ERROR: 意外错误 ({e})"
+
+# --- 添加：尝试恢复丢失的翻译索引 ---
+def try_recover_missing_translations(translation_result, expected_indices, original_texts):
+    """
+    尝试从翻译结果中恢复缺失的索引翻译
+    
+    参数:
+        translation_result: 完整的翻译结果文本
+        expected_indices: 期望包含的索引列表
+        original_texts: 原始待翻译文本列表，格式为 "索引: 文本内容"
+    
+    返回:
+        recovered: 字典，键为成功恢复的索引，值为对应的翻译文本
+    """
+    recovered = {}
+    
+    # 创建索引到原始文本的映射
+    index_to_original = {}
+    for text in original_texts:
+        parts = text.split(":", 1)
+        if len(parts) == 2:
+            try:
+                idx = int(parts[0].strip())
+                content = parts[1].strip()
+                index_to_original[idx] = content
+            except ValueError:
+                continue
+                
+    if not expected_indices or not translation_result:
+        return recovered
+    
+    # 先尝试使用标准格式解析（可能带有额外空格、标点等干扰）
+    pattern1 = re.compile(r'(?:^|\n)\s*(\d+)\s*[:.：]\s*(.*?)(?=\n\s*\d+\s*[:.：]|\s*$)', re.DOTALL)
+    matches = pattern1.findall(translation_result)
+    for idx_str, content in matches:
+        try:
+            idx = int(idx_str)
+            if idx in expected_indices and idx not in recovered:
+                recovered[idx] = content.strip()
+        except ValueError:
+            continue
+    
+    # 尝试查找包含索引的完整行，但格式可能有变化
+    pattern2 = re.compile(r'(?:^|\n)\s*(\d+)[^:：\n]*[:.：](.*?)(?=\n|$)', re.MULTILINE)
+    matches = pattern2.findall(translation_result)
+    for idx_str, content in matches:
+        try:
+            idx = int(idx_str)
+            if idx in expected_indices and idx not in recovered:
+                recovered[idx] = content.strip()
+        except ValueError:
+            continue
+    
+    # 尝试顺序匹配策略（基于行的位置）
+    lines = [line.strip() for line in translation_result.split('\n') if line.strip()]
+    ordered_indices = sorted(list(index_to_original.keys()))
+    
+    # 计算有多少行可能是翻译结果（排除空行、注释行等）
+    potential_translation_lines = []
+    for line in lines:
+        # 排除明显不是翻译的行
+        if not line or line.startswith('#') or line.startswith('//') or re.match(r'^[a-zA-Z\s]+:$', line):
+            continue
+        
+        # 检查是否已经是标准格式（索引:翻译）
+        if re.match(r'^\d+\s*[:.：]', line):
+            continue
+            
+        potential_translation_lines.append(line)
+    
+    # 如果潜在翻译行数量与缺失索引数量接近，尝试按顺序匹配
+    missing_indices = [idx for idx in expected_indices if idx not in recovered]
+    
+    if len(potential_translation_lines) > 0 and len(missing_indices) > 0:
+        # 按索引的顺序排列
+        missing_indices.sort()
+        
+        # 尝试按顺序匹配缺失的索引和可能的翻译行
+        for i, idx in enumerate(missing_indices):
+            if i < len(potential_translation_lines):
+                content = potential_translation_lines[i]
+                if idx not in recovered:
+                    recovered[idx] = content.strip()
+    
+    # 使用内容相似度匹配（针对较短文本）
+    missing_indices = [idx for idx in expected_indices if idx not in recovered]
+    if missing_indices and len(potential_translation_lines) > 0:
+        for idx in missing_indices:
+            if idx in index_to_original:
+                original = index_to_original[idx]
+                # 只对较短的文本使用此策略，避免长文本的误匹配
+                if len(original) < 100:  
+                    for line in potential_translation_lines:
+                        # 如果翻译后的行长度与原文相对接近，可能是对应的翻译
+                        if 0.5 <= len(line) / max(1, len(original)) <= 2.0:
+                            recovered[idx] = line.strip()
+                            potential_translation_lines.remove(line)  # 已匹配的行不再重复使用
+                            break
+    
+    return recovered
 
 # --- 获取剧集上下文信息 (不变) ---
 def get_prompt_context_by_path(file_path):
@@ -290,51 +394,122 @@ def process_file(file_path):
         print(f"共找到 {num_to_translate} 行有效文本需要翻译")
 
         if num_to_translate > 0:
-            combined_texts = "\n".join(texts_to_translate_with_index)
-            full_prompt = BATCH_TRANSLATION_PROMPT_TEMPLATE.format(
-                series_name=series_name,
-                specific_instructions=specific_instructions,
-                combined_texts=combined_texts
-            )
-            print(f"准备调用翻译 API 翻译 {num_to_translate} 行文本...")
-            # print(f"使用的提示词 (部分): {full_prompt}[:600]...") # 调试时可以取消注释
-
-            translation_result = translate_text(
-                "", TRANSLATE_MODEL_NAME, None, None, full_prompt
-            )
+            # 将文本分批处理，每批次最多30条
+            batch_size = 30
+            total_batches = (num_to_translate + batch_size - 1) // batch_size  # 向上取整
             
-            print(f"翻译 API 原始返回 (前500字符): {translation_result}...")
+            print(f"将分成 {total_batches} 个批次进行翻译，每批次最多 {batch_size} 条文本")
             
-            # 基于索引处理翻译结果
-            if translation_result and not translation_result.startswith("ERROR"):
-                translated_lines = translation_result.strip().split('\n')
-                processed_indices = set()
-                parse_errors = 0
-                line_pattern = re.compile(r"^(\d+):\s?(.*)$")
-                for line in translated_lines:
-                    line = line.strip(); 
-                    if not line: continue
-                    match = line_pattern.match(line)
-                    if match:
-                        try:
-                            parsed_index = int(match.group(1))
-                            parsed_translation = match.group(2).strip()
-                            if parsed_index in original_indices:
-                                df.loc[parsed_index, 'target-translation'] = parsed_translation
-                                processed_indices.add(parsed_index)
-                            else: parse_errors += 1 # 记录未请求的索引错误
-                        except ValueError: parse_errors += 1 # 记录索引转换错误
-                    else: parse_errors += 1 # 记录格式不匹配错误
-                print(f"翻译结果映射完成。共成功映射 {len(processed_indices)} 行。解析错误/警告数: {parse_errors}")
-                missing_indices = set(original_indices) - processed_indices
-                if missing_indices:
-                    print(f"警告: 以下请求的翻译缺失或无法解析: {sorted(list(missing_indices))}")
-                    for index in missing_indices:
-                        df.loc[index, 'target-translation'] = "ERROR: Translation missing or unparsable"
-            else:
-                print(f"翻译API调用失败: {translation_result}")
-                for index in original_indices:
-                    df.loc[index, 'target-translation'] = f"ERROR: API call failed ({translation_result})"
+            for batch_idx in range(total_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, num_to_translate)
+                current_batch = texts_to_translate_with_index[start_idx:end_idx]
+                current_indices = original_indices[start_idx:end_idx]
+                
+                print(f"\n处理第 {batch_idx + 1}/{total_batches} 批翻译 (共 {len(current_batch)} 条)...")
+                
+                combined_texts = "\n".join(current_batch)
+                full_prompt = BATCH_TRANSLATION_PROMPT_TEMPLATE.format(
+                    series_name=series_name,
+                    specific_instructions=specific_instructions,
+                    combined_texts=combined_texts,
+                    required_indices=", ".join(map(str, current_indices))
+                )
+                
+                # 尝试最多3次翻译，直到成功或达到最大尝试次数
+                max_attempts = 3
+                for attempt in range(max_attempts):
+                    try:
+                        print(f"批次 {batch_idx + 1}/{total_batches} - 尝试翻译 (第 {attempt + 1}/{max_attempts} 次)...")
+                        translation_result = translate_text(
+                            "", TRANSLATE_MODEL_NAME, None, None, full_prompt
+                        )
+                        
+                        if translation_result and not translation_result.startswith("ERROR"):
+                            # 翻译成功，处理这个批次的结果
+                            translated_lines = translation_result.strip().split('\n')
+                            processed_indices = set()
+                            parse_errors = 0
+                            line_pattern = re.compile(r"^(\d+):\s?(.*)$")
+                            
+                            for line in translated_lines:
+                                line = line.strip(); 
+                                if not line: continue
+                                match = line_pattern.match(line)
+                                if match:
+                                    try:
+                                        parsed_index = int(match.group(1))
+                                        parsed_translation = match.group(2).strip()
+                                        if parsed_index in current_indices:
+                                            df.loc[parsed_index, 'target-translation'] = parsed_translation
+                                            processed_indices.add(parsed_index)
+                                        else: parse_errors += 1 # 记录未请求的索引错误
+                                    except ValueError: parse_errors += 1 # 记录索引转换错误
+                                else: parse_errors += 1 # 记录格式不匹配错误
+                            
+                            # 检查这批中是否有缺失的翻译
+                            missing_indices = set(current_indices) - processed_indices
+                            if missing_indices:
+                                # 如果这不是最后一次尝试，且存在缺失，则重试这些缺失的条目
+                                if attempt < max_attempts - 1 and len(missing_indices) < len(current_indices):
+                                    print(f"批次 {batch_idx + 1} 有 {len(missing_indices)}/{len(current_indices)} 条翻译缺失，准备重试这些条目...")
+                                    # 只重试缺失的条目
+                                    retry_items = []
+                                    retry_indices = []
+                                    for i, item in enumerate(current_batch):
+                                        index = current_indices[i]
+                                        if index in missing_indices:
+                                            retry_items.append(item)
+                                            retry_indices.append(index)
+                                    
+                                    current_batch = retry_items
+                                    current_indices = retry_indices
+                                    combined_texts = "\n".join(current_batch)
+                                    full_prompt = BATCH_TRANSLATION_PROMPT_TEMPLATE.format(
+                                        series_name=series_name,
+                                        specific_instructions=specific_instructions,
+                                        combined_texts=combined_texts,
+                                        required_indices=", ".join(map(str, current_indices))
+                                    )
+                                    continue  # 继续下一次尝试
+                                else:
+                                    # 最后一次尝试或全部缺失，记录缺失情况
+                                    print(f"批次 {batch_idx + 1} 最终缺失 {len(missing_indices)} 条翻译: {sorted(list(missing_indices))}")
+                                    for index in missing_indices:
+                                        df.loc[index, 'target-translation'] = "ERROR: Translation missing or unparsable"
+                            
+                            print(f"批次 {batch_idx + 1} 翻译完成。成功: {len(processed_indices)}/{len(current_indices)}，解析错误: {parse_errors}")
+                            break  # 这批处理成功，跳出尝试循环
+                        else:
+                            # 翻译API调用失败
+                            print(f"批次 {batch_idx + 1} 翻译API调用失败: {translation_result}")
+                            if attempt < max_attempts - 1:
+                                print(f"等待5秒后重试...")
+                                time.sleep(5)
+                            else:
+                                # 最后一次尝试也失败，标记所有条目为错误
+                                for index in current_indices:
+                                    df.loc[index, 'target-translation'] = f"ERROR: API call failed ({translation_result})"
+                    except Exception as e:
+                        print(f"批次 {batch_idx + 1} 处理异常: {e}")
+                        if attempt < max_attempts - 1:
+                            print(f"等待5秒后重试...")
+                            time.sleep(5)
+                        else:
+                            # 最后一次尝试也失败，标记所有条目为错误
+                            for index in current_indices:
+                                df.loc[index, 'target-translation'] = f"ERROR: 处理异常 ({e})"
+                
+                # 批次之间增加延时，避免API限制
+                if batch_idx < total_batches - 1:
+                    print(f"等待5秒后处理下一批翻译...")
+                    time.sleep(5)
+            
+            # 汇总最终翻译结果
+            successful_translations = df[df['target-translation'].notnull() & ~df['target-translation'].str.startswith('ERROR')].shape[0]
+            print(f"\n翻译总结: 共 {num_to_translate} 项，成功 {successful_translations} 项，失败 {num_to_translate - successful_translations} 项")
+        else:
+            print("没有找到需要翻译的有效文本。")
 
         # --- 批量评分 --- 
         print("\n开始准备批量评分...")
@@ -366,8 +541,8 @@ def process_file(file_path):
         df['localization'] = 0
         
         if num_to_rate > 0:
-            # 将翻译分成多个小批次进行评分，每批次最多10条
-            batch_size = 10
+            # 将翻译分成多个小批次进行评分，每批次最多15条
+            batch_size = 15
             total_batches = (num_to_rate + batch_size - 1) // batch_size  # 向上取整
             rated_count = 0
             
@@ -491,3 +666,105 @@ if __name__ == "__main__":
     print(f"开始在目录中查找并处理文件: {BASE_DIR}")
     find_and_process_files(BASE_DIR)
     print("\n所有文件翻译与评分处理任务已尝试完成！")
+
+def batch_translate_texts(texts, model_name, api_key=None, api_url=None, context_info=None, required_indices=None):
+    """
+    批量翻译多段文本
+    
+    参数:
+        texts: 要翻译的文本列表
+        model_name: 使用的模型名称
+        api_key: API密钥，如不指定则自动轮询选择
+        api_url: API接口地址，如不指定则使用默认地址
+        context_info: 剧集上下文信息，可选
+        required_indices: 要求包含的索引列表，用于索引验证
+    
+    返回:
+        translations: 字典，键为索引，值为翻译
+    """
+    result = {}
+    
+    if not texts:
+        return result
+    
+    # 如果未指定API密钥，则轮询获取下一个
+    if api_key is None:
+        api_key = get_next_translate_api_key()
+        print(f"使用翻译API密钥: {api_key[:15]}... (轮询选择)")
+
+    # 构建批量翻译的prompt
+    prefix = ""
+    if context_info:
+        context = context_info.get("show_name", "") + " " + context_info.get("episode_name", "")
+        characters = ", ".join(context_info.get("characters", []))
+        prefix = f"剧集背景：{context}\n人物: {characters}\n\n" if context and characters else ""
+    
+    # 提取当前批次的索引列表
+    current_indices = []
+    for text in texts:
+        parts = text.split(":", 1)
+        if len(parts) == 2:
+            try:
+                idx = int(parts[0].strip())
+                current_indices.append(idx)
+            except ValueError:
+                pass
+    
+    # 如果未指定required_indices，则使用当前批次的索引
+    if required_indices is None:
+        required_indices = current_indices
+    
+    # 使用要求严格索引对应的批量翻译模板
+    text_content = "\n".join(texts)
+    prompt = BATCH_TRANSLATION_PROMPT_TEMPLATE.format(
+        prefix=prefix,
+        text_content=text_content,
+        required_indices=", ".join(map(str, required_indices))
+    )
+    
+    print(f"\n正在批量翻译{len(texts)}段文本... 要求包含索引: {required_indices}")
+    translation = translate_text('', model_name, api_key, api_url, prompt)
+    
+    # 如果翻译失败，返回空字典
+    if translation.startswith("ERROR"):
+        print(f"批量翻译失败: {translation}")
+        return result
+    
+    # 解析翻译结果
+    line_pattern = re.compile(r"^(\d+):\s?(.*)$")
+    for line in translation.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        
+        match = line_pattern.match(line)
+        if match:
+            try:
+                index = int(match.group(1))
+                translated_text = match.group(2).strip()
+                result[index] = translated_text
+            except (ValueError, IndexError):
+                print(f"解析翻译行失败: {line}")
+    
+    # 检查是否有索引缺失
+    missing_indices = set(required_indices) - set(result.keys())
+    if missing_indices:
+        print(f"警告: 翻译结果中缺少以下索引: {missing_indices}")
+        print(f"当前批次共{len(texts)}行，成功解析{len(result)}行翻译")
+        
+        # 尝试使用新的恢复函数恢复缺失的翻译
+        recovered = try_recover_missing_translations(translation, current_indices, texts)
+        if recovered:
+            # 更新结果字典
+            for idx, text in recovered.items():
+                if idx not in result:  # 只添加之前缺失的
+                    result[idx] = text
+                    print(f"已恢复索引 {idx} 的翻译")
+        
+        # 再次检查是否有索引仍然缺失
+        still_missing = set(required_indices) - set(result.keys())
+        if still_missing:
+            print(f"警告: 仍有{len(still_missing)}个索引的翻译无法恢复: {still_missing}")
+    
+    print(f"批量翻译完成，共解析{len(result)}行翻译")
+    return result
