@@ -10,6 +10,7 @@ from itertools import cycle # 导入cycle用于循环迭代API密钥
 # 移除评分相关的导入
 # from rating_script import rate_translation, RATING_PROMPT_TEMPLATE
 from constant import *
+from en_fr_constant import *
 
 # --- 新增：从 rating_script 导入评分相关组件和配置 ---
 from rating_script import rate_translation, RATING_PROMPT_TEMPLATE, batch_rate_translations
@@ -29,14 +30,21 @@ out_put_BASE_DIR = r"C:\\Users\\User\\Downloads\\AI配音中翻英台本 0320\\A
 # out_put_BASE_DIR = r"E:\\Apple"
 
 # API密钥配置文件路径
-API_KEYS_CONFIG_FILE = "api_keys.json"
+API_KEYS_CONFIG_FILE = "api_keys_grok.json"
 
 # 默认翻译 API 接口地址
-TRANSLATE_API_URL = "https://cloud.infini-ai.com/maas/v1/chat/completions"
+# TRANSLATE_API_URL = "https://cloud.infini-ai.com/maas/v1/chat/completions"
+TRANSLATE_API_URL = "https://api.x.ai/v1/chat/completions"
 # 默认翻译 API 密钥
 DEFAULT_TRANSLATE_API_KEYS = [
-    "Bearer sk-daz7idir52x7kash",  # 原始密钥作为第一个
+    "Bearer xai-0rkRDFt2xe041BgWMaf9o7naR1cdrcd8i0yJyzCzh0KXacUpxj5nHpjbMYgguUy8N0X0GJkeXLJUkmJY",  # 原始密钥作为第一个
 ]
+
+# 定义代理服务器
+proxies = {
+        'http': 'http://10.252.27.1:8888',
+        'https': 'http://10.252.27.1:8888', # 假设HTTPS也走这个代理
+}
 
 # 尝试从配置文件加载API密钥
 def load_api_keys():
@@ -107,7 +115,7 @@ TRANSLATE_API_KEYS = TRANSLATE_API_KEYS if 'TRANSLATE_API_KEYS' in locals() else
 current_translate_api_key_index = 0
 
 # 翻译使用的模型名称
-TRANSLATE_MODEL_NAME = "deepseek-v3"
+TRANSLATE_MODEL_NAME = "grok-3-beta"
 
 # --- API密钥轮询功能 ---
 def get_next_translate_api_key():
@@ -189,7 +197,9 @@ def translate_text(text, model_name, api_key=None, api_url=None, prompt=None):
         
         while retries < max_retries:
             try:
-                response = requests.post(api_url, headers=headers, data=payload, timeout=300)
+            
+                # 在请求中加入代理设置
+                response = requests.post(api_url, headers=headers, data=payload, timeout=300, proxies=proxies)
                 response.raise_for_status()
                 break  # 请求成功，跳出重试循环
             except (requests.exceptions.RequestException, requests.exceptions.HTTPError) as e:
@@ -202,7 +212,7 @@ def translate_text(text, model_name, api_key=None, api_url=None, prompt=None):
                 api_key = get_next_translate_api_key()
                 headers['Authorization'] = api_key
                 print(f"尝试使用新翻译API密钥: {api_key[:15]}...")
-                time.sleep(1)  # 稍等一下再重试
+                # time.sleep(1)  # 稍等一下再重试
         
         data = response.json()
         translation = data.get('choices', [{}])[0].get('message', {}).get('content', '')
@@ -485,7 +495,7 @@ def process_file(file_path):
                             print(f"批次 {batch_idx + 1} 翻译API调用失败: {translation_result}")
                             if attempt < max_attempts - 1:
                                 print(f"等待5秒后重试...")
-                                time.sleep(5)
+                                # time.sleep(5)
                             else:
                                 # 最后一次尝试也失败，标记所有条目为错误
                                 for index in current_indices:
@@ -494,7 +504,7 @@ def process_file(file_path):
                         print(f"批次 {batch_idx + 1} 处理异常: {e}")
                         if attempt < max_attempts - 1:
                             print(f"等待5秒后重试...")
-                            time.sleep(5)
+                            # time.sleep(5)
                         else:
                             # 最后一次尝试也失败，标记所有条目为错误
                             for index in current_indices:
@@ -503,7 +513,7 @@ def process_file(file_path):
                 # 批次之间增加延时，避免API限制
                 if batch_idx < total_batches - 1:
                     print(f"等待5秒后处理下一批翻译...")
-                    time.sleep(5)
+                    # time.sleep(5)
             
             # 汇总最终翻译结果
             successful_translations = df[df['target-translation'].notnull() & ~df['target-translation'].str.startswith('ERROR')].shape[0]
@@ -534,11 +544,13 @@ def process_file(file_path):
         print(f"共找到 {num_to_rate} 行有效翻译需要评分")
         
         # 初始化评分列
-        df['accuracy'] = 0
-        df['fluency'] = 0
-        df['contextual'] = 0
-        df['lipsync'] = 0
-        df['localization'] = 0
+        df['术语表一致性'] = 0
+        df['tu/vous关系'] = 0
+        df['语言分级'] = 0
+        df['计量单位'] = 0
+        df['翻译完整度'] = 0
+        df['开闭口匹配'] = 0
+        df['音节数匹配'] = 0
         
         if num_to_rate > 0:
             # 将翻译分成多个小批次进行评分，每批次最多15条
@@ -555,7 +567,7 @@ def process_file(file_path):
                 
                 print(f"\n处理第 {batch_idx + 1}/{total_batches} 批评分 (共 {len(current_batch)} 条)...")
                 
-                # 调用批量评分函数评分当前批次
+                # 调用批量评分函数评分当前批次 
                 batch_score_results = batch_rate_translations(
                     current_batch,
                     RATING_MODEL_NAME   # 使用评分模型
@@ -564,11 +576,13 @@ def process_file(file_path):
                 
                 # 更新DataFram中的评分
                 for index, scores in batch_score_results.items():
-                    df.loc[index, 'accuracy'] = scores.get('accuracy', 0)
-                    df.loc[index, 'fluency'] = scores.get('fluency', 0)
-                    df.loc[index, 'contextual'] = scores.get('contextual', 0)
-                    df.loc[index, 'lipsync'] = scores.get('lipsync', 0)
-                    df.loc[index, 'localization'] = scores.get('localization', 0)
+                    df.loc[index, '术语表一致性'] = scores.get('术语表一致性', 0)
+                    df.loc[index, 'tu/vous关系'] = scores.get('tu/vous关系', 0)
+                    df.loc[index, '语言分级'] = scores.get('语言分级', 0)
+                    df.loc[index, '计量单位'] = scores.get('计量单位', 0)
+                    df.loc[index, '翻译完整度'] = scores.get('翻译完整度', 0)
+                    df.loc[index, '开闭口匹配'] = scores.get('开闭口匹配', 0)
+                    df.loc[index, '音节数匹配'] = scores.get('音节数匹配', 0)
                     rated_count += 1
                 
                 # 检查是否有评分缺失
@@ -580,7 +594,7 @@ def process_file(file_path):
                 # 批次之间增加短暂延时，避免API限制
                 if batch_idx < total_batches - 1:
                     print("等待7秒后继续下一批评分...")
-                    time.sleep(7)
+                    # time.sleep(7)
             
             print(f"\n评分完成。共对 {rated_count} 行进行了有效评分。")
         else:
@@ -592,7 +606,7 @@ def process_file(file_path):
             'speaker', 'start_time', 'end_time', 'transcription', 
             'translation', # 保留原始翻译列（如果存在）
             'target-translation', # 新的翻译列
-            'accuracy', 'fluency', 'contextual', 'lipsync', 'localization' # 新的评分列
+            '术语表一致性', 'tu/vous关系', '语言分级', '计量单位', '翻译完整度', '开闭口匹配', '音节数匹配' # 新的评分列
         ]
         # 确保所有选择的列都实际存在于DataFrame中
         final_columns = [col for col in final_columns if col in df.columns]
